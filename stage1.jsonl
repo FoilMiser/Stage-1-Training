@@ -1,0 +1,12 @@
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/math/asdiv/*", "type": "math_tool", "weight": 0.3}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/core/c4/c4-train.*", "type": "lm", "weight": 1.0}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/core/c4/shards/validation/*", "type": "lm", "weight": 1.0}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/code/codesearchnet/shards/*", "type": "code", "weight": 0.2}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/*", "type": "lm", "weight": 0.5}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-100BT/*", "type": "lm", "weight": 0.35}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/*", "type": "lm", "weight": 1.0}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-350BT/*", "type": "lm", "weight": 0.25}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/math/gsm8k/*", "type": "math_tool", "weight": 0.5}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/math/svamp/*", "type": "math_tool", "weight": 0.3}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/core/wikipedia/shards/*", "type": "lm", "weight": 1.0}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/core/wikitext/shards/*", "type": "lm", "weight": 1.0}

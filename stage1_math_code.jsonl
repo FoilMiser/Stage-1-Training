@@ -1,0 +1,4 @@
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/math/asdiv/*", "type": "math_tool", "weight": 0.3}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/code/codesearchnet/shards/*", "type": "code", "weight": 0.2}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/math/gsm8k/*", "type": "math_tool", "weight": 0.5}
+{"path": "gs://liquid-llm-bucket-2/datasets/stage1/math/svamp/*", "type": "math_tool", "weight": 0.3}

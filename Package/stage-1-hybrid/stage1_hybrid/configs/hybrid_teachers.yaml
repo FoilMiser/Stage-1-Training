@@ -1,0 +1,11 @@
+lm:
+  mode: online
+  teacher_id: meta-llama/Llama-3.2-3B
+math_tool:
+  mode: precompute
+  teacher_id: meta-llama/Llama-3.1-8B
+  logits_dir: gs://liquid-llm-bucket-2/teacher/llama-3.1-8b/logits/math/
+code:
+  mode: precompute
+  teacher_id: meta-llama/Llama-3.1-8B
+  logits_dir: gs://liquid-llm-bucket-2/teacher/llama-3.1-8b/logits/code/

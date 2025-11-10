@@ -1,0 +1,118 @@
+wikitext:
+  type: lm
+  in: gs://liquid-llm-bucket-2/datasets/stage1/core/wikitext/wikitext-103-v1.zip
+  out: gs://liquid-llm-bucket-2/datasets/stage1/core/wikitext/shards/
+  manifest: gs://liquid-llm-bucket-2/datasets/stage1/core/wikitext/shards/*.jsonl
+wikipedia:
+  type: lm
+  in: gs://liquid-llm-bucket-2/datasets/stage1/core/wikipedia/enwiki-latest-pages-articles-multistream.xml.bz2
+  out: gs://liquid-llm-bucket-2/datasets/stage1/core/wikipedia/shards/
+  manifest: gs://liquid-llm-bucket-2/datasets/stage1/core/wikipedia/shards/*.jsonl
+c4_train:
+  type: lm
+  in: gs://liquid-llm-bucket-2/datasets/stage1/core/c4/c4-train.00000-of-01024.json.gz
+  out: gs://liquid-llm-bucket-2/datasets/stage1/core/c4/shards/train/
+  manifest: gs://liquid-llm-bucket-2/datasets/stage1/core/c4/c4-train.*.json.gz
+c4_validation:
+  type: lm
+  in: gs://liquid-llm-bucket-2/datasets/stage1/core/c4/c4-validation.00000-of-00008.json.gz
+  out: gs://liquid-llm-bucket-2/datasets/stage1/core/c4/shards/validation/
+  manifest: null
+fineweb_edu_10bt:
+  type: lm
+  in:
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/000_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/001_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/002_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/003_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/004_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/005_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/006_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/007_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/008_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/009_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/010_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/011_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/012_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/013_00000.parquet
+  out: gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/shards/10BT/
+  manifest: gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-10BT/*.parquet
+fineweb_edu_100bt:
+  type: lm
+  in:
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-100BT/000_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-100BT/000_00001.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-100BT/000_00002.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-100BT/000_00003.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-100BT/000_00004.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-100BT/000_00005.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-100BT/001_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-100BT/001_00001.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-100BT/002_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-100BT/003_00000.parquet
+  out: gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/shards/100BT/
+  manifest: gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-100BT/*.parquet
+fineweb_edu_350bt:
+  type: lm
+  in:
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-350BT/000_00000.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-350BT/000_00001.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-350BT/000_00002.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-350BT/000_00003.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-350BT/000_00004.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-350BT/000_00005.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-350BT/000_00006.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-350BT/000_00007.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-350BT/000_00008.parquet
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-350BT/000_00009.parquet
+  out: gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/shards/350BT/
+  manifest: gs://liquid-llm-bucket-2/datasets/stage1/core/fineweb-edu/sample-350BT/*.parquet
+dolma_v1_6_sample:
+  type: lm
+  in:
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0000.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0001.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0002.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0003.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0004.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0005.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0006.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0007.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0008.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0009.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0010.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0011.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0012.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0013.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0014.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0015.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0016.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0017.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0018.json.gz
+  - gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/v1_5r2_sample-0019.json.gz
+  out: gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/shards/
+  manifest: gs://liquid-llm-bucket-2/datasets/stage1/core/dolma/v1_6_sample/*.json.gz
+gsm8k:
+  type: math_tool
+  in:
+  - gs://liquid-llm-bucket-2/datasets/stage1/math/gsm8k/train.jsonl
+  - gs://liquid-llm-bucket-2/datasets/stage1/math/gsm8k/test.jsonl
+  out: gs://liquid-llm-bucket-2/datasets/stage1/math/gsm8k/shards/
+  manifest: gs://liquid-llm-bucket-2/datasets/stage1/math/gsm8k/*.jsonl
+svamp:
+  type: math_tool
+  in: gs://liquid-llm-bucket-2/datasets/stage1/math/svamp/SVAMP.json
+  out: gs://liquid-llm-bucket-2/datasets/stage1/math/svamp/shards/
+  manifest: gs://liquid-llm-bucket-2/datasets/stage1/math/svamp/*.jsonl
+asdiv:
+  type: math_tool
+  in: gs://liquid-llm-bucket-2/datasets/stage1/math/asdiv/ASDiv.xml
+  out: gs://liquid-llm-bucket-2/datasets/stage1/math/asdiv/shards/
+  manifest: gs://liquid-llm-bucket-2/datasets/stage1/math/asdiv/*.jsonl
+codesearchnet:
+  type: code
+  in:
+  - gs://liquid-llm-bucket-2/datasets/stage1/code/CodeSearchNet/python.zip
+  - gs://liquid-llm-bucket-2/datasets/stage1/code/CodeSearchNet/java.zip
+  out: gs://liquid-llm-bucket-2/datasets/stage1/code/codesearchnet/shards/
+  manifest: gs://liquid-llm-bucket-2/datasets/stage1/code/codesearchnet/shards/*.jsonl

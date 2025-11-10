@@ -1,10 +1,10 @@
 """Helpers for interacting with Google Cloud Storage in Vertex jobs."""
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Iterable, List, Any, Tuple, Optional
-
 import io
+import shutil
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 try:  # Primary, robust client
     from google.cloud import storage
@@ -28,6 +28,8 @@ class GCSIOError(RuntimeError):
 
 
 _DEF_RETRIES = 3
+_STREAM_CHUNK_BYTES = 8 * 1024 * 1024
+_GCSFS_SINGLETON: Optional["gcsfs.GCSFileSystem"] = None
 
 
 def _with_retries(func, *, retries: int = _DEF_RETRIES) -> Any:
@@ -76,17 +78,45 @@ def _storage_client():
     return storage.Client()
 
 
-def _gcsfs_filesystem():
+def _gcsfs_filesystem() -> "gcsfs.GCSFileSystem":
+    global _GCSFS_SINGLETON
     if gcsfs is None:
         raise GCSIOError(
             "gcsfs is required but not installed and google-cloud-storage is unavailable."
         )
-    return gcsfs.GCSFileSystem()
+    if _GCSFS_SINGLETON is None:
+        _GCSFS_SINGLETON = gcsfs.GCSFileSystem(
+            token="cloud",
+            default_cache_type="none",
+            cache_timeout=0,
+            consistency_period=0.0,
+        )
+    return _GCSFS_SINGLETON
+
+
+def get_gcsfs() -> "gcsfs.GCSFileSystem":
+    """Return a shared gcsfs filesystem instance configured for streaming."""
+
+    return _gcsfs_filesystem()
+
+
+def open_uri(uri: str, mode: str = "rb", *, block_size: int = _STREAM_CHUNK_BYTES):
+    """Open a URI for streaming without materialising it on disk."""
+
+    if uri.startswith("gs://"):
+        fs = _gcsfs_filesystem()
+        return fs.open(uri, mode, block_size=block_size, cache_type="none")
+    return open(uri, mode)  # noqa: SIM115
 
 
 def gcs_to_local(gcs_uri: str, local_path: str, retries: int = _DEF_RETRIES) -> str:
     """Copy a single object from GCS to a local path."""
     _ensure_parent(local_path)
+
+    def _download_stream(copy_func: Callable[[], None]) -> str:
+        copy_func()
+        logger.info("Copied %s -> %s", gcs_uri, local_path)
+        return local_path
 
     if _have_storage_client():
         def _download() -> str:
@@ -97,22 +127,73 @@ def gcs_to_local(gcs_uri: str, local_path: str, retries: int = _DEF_RETRIES) -> 
             blob = client.bucket(bucket_name).blob(key)
             if not blob.exists():
                 raise GCSIOError(f"GCS object not found: {gcs_uri}")
-            # CRC32C by default; adds integrity
-            blob.download_to_filename(local_path, checksum="crc32c")
-            logger.info("Copied %s -> %s", gcs_uri, local_path)
-            return local_path
+
+            def _copy() -> None:
+                with open(local_path, "wb") as dst:
+                    blob.download_to_file(dst, checksum="crc32c")
+
+            return _download_stream(_copy)
 
         return _with_retries(_download, retries=retries)
 
-    # Fallback to gcsfs
     def _download_fs() -> str:
-        fs = _gcsfs_filesystem()
-        with fs.open(gcs_uri, "rb") as src, open(local_path, "wb") as dst:
-            dst.write(src.read())
-        logger.info("Copied (gcsfs) %s -> %s", gcs_uri, local_path)
-        return local_path
+        def _copy() -> None:
+            with open_uri(gcs_uri, "rb") as src, open(local_path, "wb") as dst:
+                shutil.copyfileobj(src, dst, length=_STREAM_CHUNK_BYTES)
+
+        return _download_stream(_copy)
 
     return _with_retries(_download_fs, retries=retries)
+
+
+def _iter_local_files(src_path: Path) -> Iterator[Tuple[Path, str]]:
+    if src_path.is_dir():
+        for child in sorted(src_path.rglob("*")):
+            if child.is_file():
+                yield child, child.relative_to(src_path).as_posix()
+    else:
+        yield src_path, src_path.name
+
+
+def _upload_file(
+    file_src: Path,
+    object_uri: str,
+    *,
+    retries: int,
+    content_type: Optional[str] = None,
+) -> None:
+    def _upload_with_storage() -> None:
+        client = _storage_client()
+        bucket_name, key = _parse_gcs_uri(object_uri)
+        if not key:
+            raise GCSIOError(f"local_to_gcs target must be an object path: {object_uri}")
+        blob = client.bucket(bucket_name).blob(key)
+
+        try:
+            blob.upload_from_filename(
+                filename=str(file_src),
+                if_generation_match=0,
+                checksum="crc32c",
+                content_type=content_type,
+            )
+            logger.info("Uploaded %s -> %s", file_src, object_uri)
+        except PreconditionFailed:
+            logger.debug("Skipped existing object (no-clobber): %s", object_uri)
+
+    def _upload_with_fs() -> None:
+        fs = _gcsfs_filesystem()
+        try:
+            if fs.exists(object_uri):
+                logger.debug("Skipped existing object (no-clobber, gcsfs): %s", object_uri)
+                return
+        except Exception:
+            pass
+        with open(file_src, "rb") as fh, fs.open(object_uri, "wb") as dst:
+            shutil.copyfileobj(fh, dst, length=_STREAM_CHUNK_BYTES)
+        logger.info("Uploaded (gcsfs) %s -> %s", file_src, object_uri)
+
+    uploader = _upload_with_storage if _have_storage_client() else _upload_with_fs
+    _with_retries(uploader, retries=retries)
 
 
 def local_to_gcs(local_path: str, gcs_uri: str, retries: int = _DEF_RETRIES) -> None:
@@ -122,120 +203,86 @@ def local_to_gcs(local_path: str, gcs_uri: str, retries: int = _DEF_RETRIES) -> 
     exists, the upload is skipped gracefully (treated as success).
     """
     src_path = Path(local_path)
+    base_uri = gcs_uri.rstrip("/")
+    original_uri = gcs_uri
 
-    if _have_storage_client():
-        def _upload_file(file_src: Path, object_uri: str) -> None:
-            bucket_name, key = _parse_gcs_uri(object_uri)
-            if not key:
-                raise GCSIOError(f"local_to_gcs target must be an object path: {object_uri}")
-            client = _storage_client()
-            blob = client.bucket(bucket_name).blob(key)
-
-            # Attempt no-clobber upload; treat 'already exists' as success.
-            try:
-                blob.upload_from_filename(
-                    filename=str(file_src),
-                    if_generation_match=0,   # only create if object does not exist
-                    checksum="crc32c",       # integrity
-                )
-                logger.info("Uploaded %s -> %s", file_src, object_uri)
-            except PreconditionFailed:
-                logger.debug("Skipped existing object (no-clobber): %s", object_uri)
-            except Exception as exc:
-                raise GCSIOError(f"Upload failed for {object_uri}: {exc}")
-
-        def _upload_dir(dir_src: Path, base_uri: str) -> None:
-            base_uri = base_uri.rstrip("/")
-            for child in sorted(dir_src.rglob("*")):
-                if child.is_file():
-                    rel = child.relative_to(dir_src).as_posix()
-                    _upload_file(child, f"{base_uri}/{rel}")
-
-        def _upload() -> None:
-            if src_path.is_dir():
-                _upload_dir(src_path, gcs_uri)
-            else:
-                _upload_file(src_path, gcs_uri)
-
-        return _with_retries(_upload, retries=retries)
-
-    # Fallback to gcsfs if storage client is unavailable.
-    def _upload_fs_file(file_src: Path, object_uri: str) -> None:
-        fs = _gcsfs_filesystem()
-        # Implement no-clobber by checking existence before write.
-        try:
-            if fs.exists(object_uri):
-                logger.debug("Skipped existing object (no-clobber, gcsfs): %s", object_uri)
-                return
-        except Exception:
-            # If exists check fails, proceed to attempt write; race is acceptable.
-            pass
-        with open(file_src, "rb") as fh, fs.open(object_uri, "wb") as dst:
-            dst.write(fh.read())
-        logger.info("Uploaded (gcsfs) %s -> %s", file_src, object_uri)
-
-    def _upload_fs() -> None:
-        if src_path.is_dir():
-            base = gcs_uri.rstrip("/")
-            for child in sorted(src_path.rglob("*")):
-                if child.is_file():
-                    rel = child.relative_to(src_path).as_posix()
-                    _upload_fs_file(child, f"{base}/{rel}")
-        else:
-            _upload_fs_file(src_path, gcs_uri)
-
-    return _with_retries(_upload_fs, retries=retries)
+    if src_path.is_dir():
+        for file_src, rel in _iter_local_files(src_path):
+            target = f"{base_uri}/{rel}"
+            _upload_file(file_src, target, retries=retries)
+    else:
+        target = f"{base_uri}/{src_path.name}" if original_uri.endswith("/") else original_uri
+        _upload_file(src_path, target, retries=retries)
 
 
-def list_gcs(uri: str, retries: int = _DEF_RETRIES) -> List[str]:
+def iter_gcs(uri: str, retries: int = _DEF_RETRIES) -> Iterator[str]:
     """
     List objects that match the provided GCS URI.
     Supported patterns:
       - Exact object: gs://bucket/path/to.obj
       - Prefix (directory-like): gs://bucket/prefix/
       - Trailing wildcard: gs://bucket/prefix/*
-    Returns gs:// URIs for matches (possibly empty).
+    Yields gs:// URIs for matches (possibly empty).
     """
     if _have_storage_client():
         def _list() -> List[str]:
             client = _storage_client()
             bucket_name, key = _parse_gcs_uri(uri)
-            out: List[str] = []
+            results: List[str] = []
 
-            # Exact object (no wildcard, no trailing slash)
             is_prefix = key.endswith("/") or key.endswith("*")
             if not key or not is_prefix:
                 blob = client.bucket(bucket_name).blob(key)
                 if blob.exists():
-                    return [uri]
-                return []
+                    results.append(uri)
+                return results
 
-            # Prefix listing
-            if key.endswith("*"):
-                prefix = key[:-1]
-            else:
-                prefix = key
-            # Strip accidental leading slashes in key
+            prefix = key[:-1] if key.endswith("*") else key
             prefix = prefix.lstrip("/")
 
             for blob in client.list_blobs(bucket_name, prefix=prefix):
-                out.append(f"gs://{bucket_name}/{blob.name}")
-            return out
+                results.append(f"gs://{bucket_name}/{blob.name}")
+            return results
 
-        return _with_retries(_list, retries=retries)
+        results = _with_retries(_list, retries=retries)
+        for item in results:
+            yield item
+        return
 
-    # Fallback to gcsfs globbing
     def _list_fs() -> List[str]:
         fs = _gcsfs_filesystem()
-        # gcsfs expects patterns without scheme in some cases; use glob on full URI.
         matches = fs.glob(uri)
-        # Normalize to gs://...
-        results: List[str] = []
-        for m in matches:
-            results.append(m if m.startswith("gs://") else f"gs://{m}")
-        return results
+        return [m if m.startswith("gs://") else f"gs://{m}" for m in matches]
 
-    return _with_retries(_list_fs, retries=retries)
+    results = _with_retries(_list_fs, retries=retries)
+    for item in results:
+        yield item
+
+
+def list_gcs(uri: str, retries: int = _DEF_RETRIES) -> List[str]:
+    return list(iter_gcs(uri, retries=retries))
+
+
+def dir_to_gcs(
+    src_dir: str,
+    dst_prefix: str,
+    *,
+    content_type_by_ext: Optional[Dict[str, str]] = None,
+    retries: int = _DEF_RETRIES,
+) -> None:
+    """Upload a directory tree to a GCS prefix with optional content types."""
+
+    base = Path(src_dir)
+    if not base.is_dir():
+        raise GCSIOError(f"dir_to_gcs expects a directory, got: {src_dir}")
+    normalized = dst_prefix.rstrip("/")
+    mapping = {k.lower(): v for k, v in (content_type_by_ext or {}).items()}
+
+    for file_src, rel in _iter_local_files(base):
+        ext = file_src.suffix.lower()
+        content_type = mapping.get(ext)
+        target = f"{normalized}/{rel}"
+        _upload_file(file_src, target, retries=retries, content_type=content_type)
 
 
 def maybe_sync_dir(local_dir: str, gcs_dir: str) -> None:

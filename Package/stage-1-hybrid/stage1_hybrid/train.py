@@ -18,6 +18,11 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
+try:  # optional dependency for host memory stats
+    import psutil
+except Exception:  # pragma: no cover
+    psutil = None
+
 from . import losses
 from .eval import run_validation
 from .gcs_io import ensure_local_dir, local_to_gcs
@@ -616,6 +621,7 @@ class Trainer:
                 "examples_per_sec": total_examples / elapsed,
                 "grad_norm": float(grad_norm),
                 "gpu_mem_alloc_MB": self._gpu_mem_mb(),
+                "host_mem_mb": self._host_mem_mb(),
             }
             self._last_metrics = metrics
             return StepResult(True, metrics, total_tokens, total_examples, float(grad_norm))
@@ -628,6 +634,14 @@ class Trainer:
         if torch.cuda.is_available() and self.device.type == "cuda":
             return torch.cuda.memory_allocated(self.device) / 1_000_000.0
         return 0.0
+
+    def _host_mem_mb(self) -> float:
+        if psutil is None:
+            return 0.0
+        try:
+            return psutil.Process().memory_info().rss / 1_000_000.0
+        except Exception:
+            return 0.0
 
     def _maybe_eval(self) -> float:
         if self.val_loader is None:

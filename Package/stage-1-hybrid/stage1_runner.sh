@@ -40,6 +40,13 @@ export HF_HOME="${HF_HOME:-/root/.cache/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
+export STREAMING="${STREAMING:-true}"
+export DL_NUM_WORKERS="${DL_NUM_WORKERS:-2}"
+export DL_PREFETCH_FACTOR="${DL_PREFETCH_FACTOR:-1}"
+export PARQUET_BATCH_ROWS="${PARQUET_BATCH_ROWS:-1024}"
+export DATA_MAX_OPEN_FILES="${DATA_MAX_OPEN_FILES:-2}"
+export DATA_MAX_CACHE_BYTES="${DATA_MAX_CACHE_BYTES:-3221225472}"
+
 # -------------------- Local layout --------------------
 ROOT="/opt"
 CODE_ROOT="$ROOT/code"
@@ -127,7 +134,7 @@ import sys, subprocess
 try:
     import pythonjsonlogger  # noqa: F401
 except Exception:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "python-json-logger"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "python-json-logger==3.2.1"])
 PY
 
 # -------------------- Hugging Face token via Secret Manager (no gcloud prompts) --------------------
@@ -194,6 +201,11 @@ COMMON_ARGS=("${STUDENT_ARG[@]}")
 [[ -n "${TORCH_DTYPE:-}" ]] && COMMON_ARGS+=(--torch-dtype "$TORCH_DTYPE")      # e.g., bfloat16
 [[ -n "${GRAD_ACCUM_STEPS:-}" ]] && COMMON_ARGS+=(--grad-accum-steps "$GRAD_ACCUM_STEPS")
 [[ -n "${CONFIG_DS_JSON:-}" ]] && COMMON_ARGS+=(--deepspeed "$CONFIG_DS_JSON")
+COMMON_ARGS+=(--streaming "$STREAMING")
+COMMON_ARGS+=(--dl-num-workers "$DL_NUM_WORKERS" --dl-prefetch-factor "$DL_PREFETCH_FACTOR")
+COMMON_ARGS+=(--parquet-batch-rows "$PARQUET_BATCH_ROWS")
+COMMON_ARGS+=(--data-max-open-files "$DATA_MAX_OPEN_FILES" --data-max-cache-bytes "$DATA_MAX_CACHE_BYTES")
+COMMON_ARGS+=(--arrow-num-threads "$ARROW_NUM_THREADS")
 
 # -------------------- Run --------------------
 cd "$PKG_DIR"

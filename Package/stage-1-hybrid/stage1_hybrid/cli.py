@@ -31,6 +31,7 @@ from .prep import (
     load_datasets_yaml,
     prepare_if_needed,
     normalize_gcs_uri,
+    upload_pipeline_logs,
 )
 from .runtime_setup import login_hf, enable_flash_attn_if_available, install_flash_attn_from_gcs
 from .teacher import TeacherConfig, TeacherWrapper
@@ -150,6 +151,57 @@ def _parse_betas(betas: str) -> Tuple[float, float]:
         raise argparse.ArgumentTypeError("betas must be 'beta1,beta2'")
     return parts[0], parts[1]
 
+
+def _env_or_default(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    return value if value is not None else default
+
+
+def _env_bool(name: str, default: str) -> bool:
+    try:
+        return _str_to_bool(_env_or_default(name, default))
+    except argparse.ArgumentTypeError:
+        raise argparse.ArgumentTypeError(f"Invalid boolean for {name}")
+
+
+def _parse_size_to_int(raw: str) -> int:
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    s = str(raw).strip().lower()
+    if not s:
+        return 0
+    import re as _re
+
+    match = _re.fullmatch(r"(\d+(?:\.\d+)?)([kmgt]i?b?)?", s)
+    if not match:
+        raise argparse.ArgumentTypeError(f"Invalid size: {raw}")
+    value = float(match.group(1))
+    unit = match.group(2) or ""
+    unit = unit.lower()
+    multipliers = {
+        "": 1,
+        "k": 1024,
+        "kb": 1024,
+        "ki": 1024,
+        "kib": 1024,
+        "m": 1024 ** 2,
+        "mb": 1024 ** 2,
+        "mi": 1024 ** 2,
+        "mib": 1024 ** 2,
+        "g": 1024 ** 3,
+        "gb": 1024 ** 3,
+        "gi": 1024 ** 3,
+        "gib": 1024 ** 3,
+        "t": 1024 ** 4,
+        "tb": 1024 ** 4,
+        "ti": 1024 ** 4,
+        "tib": 1024 ** 4,
+    }
+    factor = multipliers.get(unit)
+    if factor is None:
+        raise argparse.ArgumentTypeError(f"Unsupported size unit in {raw}")
+    return int(value * factor)
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser("Liquid-LLM Stage-1 CLI (HF student)")
 
@@ -231,6 +283,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--prep-continue-on-error", type=_str_to_bool, default=DEFAULTS["prep_continue_on_error"])
     p.add_argument("--prep-tail-logs", type=int, default=int(DEFAULTS["prep_tail_logs"]))
 
+    # Streaming + dataloader controls
+    p.add_argument("--streaming", type=_str_to_bool, default=_env_bool("STREAMING", "true"))
+    p.add_argument("--dl-num-workers", type=int, default=int(_env_or_default("DL_NUM_WORKERS", "2")))
+    p.add_argument("--dl-prefetch-factor", type=int, default=int(_env_or_default("DL_PREFETCH_FACTOR", "1")))
+    p.add_argument("--parquet-batch-rows", type=int, default=int(_env_or_default("PARQUET_BATCH_ROWS", "1024")))
+    p.add_argument("--data-max-open-files", type=int, default=int(_env_or_default("DATA_MAX_OPEN_FILES", "2")))
+    p.add_argument(
+        "--data-max-cache-bytes",
+        default=_env_or_default("DATA_MAX_CACHE_BYTES", "3GiB"),
+    )
+    p.add_argument("--arrow-num-threads", type=int, default=int(_env_or_default("ARROW_NUM_THREADS", "1")))
+
     return p.parse_args(argv)
 
 # ----------------------------
@@ -266,7 +330,6 @@ def _write_args_snapshot(run_dir: str, args: argparse.Namespace, run_uri: Option
 def _tail_and_upload_prep_logs(logs_dir: Path, tail_lines: int, logs_gcs_uri: str, run_id: str) -> None:
     """Best-effort: echo last N lines from each toolkit log and upload all logs to GCS."""
     try:
-        from .gcs_io import dir_to_gcs
         if logs_dir.exists():
             for lf in sorted(logs_dir.glob("*.log")):
                 try:
@@ -275,11 +338,7 @@ def _tail_and_upload_prep_logs(logs_dir: Path, tail_lines: int, logs_gcs_uri: st
                     logger.error("---- %s (last %d lines) ----\n%s\n-------------------------------", lf.name, tail_lines, tail)
                 except Exception:
                     logger.exception("Failed to tail %s", lf)
-            # Upload the entire logs directory to GCS for later inspection
-            if logs_gcs_uri:
-                dst = logs_gcs_uri.rstrip("/") + f"/prep_logs/{run_id}"
-                dir_to_gcs(str(logs_dir), dst)
-                logger.info("Uploaded prep logs to %s", dst)
+            upload_pipeline_logs(logs_dir, logs_gcs_uri, run_id)
     except Exception:
         logger.exception("Failed while uploading/tailing prep logs")
 
@@ -463,6 +522,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     math_logits_dir = args.math_logits_dir if hybrid_enabled else None
     code_logits_dir = args.code_logits_dir if hybrid_enabled else None
 
+    data_cache_bytes = _parse_size_to_int(args.data_max_cache_bytes)
+
     train_dataset = data.ManifestDataset(
         all_entries,
         dataset_tokenizer,
@@ -475,6 +536,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         code_logits_dir=code_logits_dir,
         hybrid_strict=_str_to_bool(args.hybrid_strict),
         split="train",
+        streaming=_str_to_bool(args.streaming),
+        parquet_batch_rows=int(args.parquet_batch_rows),
+        data_max_open_files=int(args.data_max_open_files),
+        data_max_cache_bytes=data_cache_bytes,
+        arrow_num_threads=int(args.arrow_num_threads),
     )
 
     data_readiness = _augment_data_readiness(prep_summary, train_dataset, manifest_snapshot, toolkit_zip, dataset_tokenizer_id)
@@ -487,15 +553,18 @@ def main(argv: Optional[List[str]] = None) -> None:
     _write_data_artifacts(local_root, data_readiness, datasets_cfg, manifest_snapshot)
 
     # DataLoaders
+    dl_workers = max(0, int(args.dl_num_workers))
+    dl_prefetch = max(1, int(args.dl_prefetch_factor))
     loader_kwargs = {
         "batch_size": int(args.batch_size),
-        "shuffle": True,
-        "num_workers": int(args.num_workers),
-        "pin_memory": device_info.device.type == "cuda",
+        "shuffle": False,
+        "num_workers": dl_workers,
+        "pin_memory": False,
+        "persistent_workers": dl_workers > 0,
         "collate_fn": data.collate_batch,
     }
-    if int(args.num_workers) > 0:
-        loader_kwargs["prefetch_factor"] = int(args.prefetch_factor)
+    if dl_workers > 0:
+        loader_kwargs["prefetch_factor"] = dl_prefetch
     train_loader = DataLoader(train_dataset, **loader_kwargs)
 
     val_loader: Optional[DataLoader] = None
@@ -513,13 +582,19 @@ def main(argv: Optional[List[str]] = None) -> None:
             code_logits_dir=code_logits_dir,
             hybrid_strict=_str_to_bool(args.hybrid_strict),
             split="val",
+            streaming=_str_to_bool(args.streaming),
+            parquet_batch_rows=int(args.parquet_batch_rows),
+            data_max_open_files=int(args.data_max_open_files),
+            data_max_cache_bytes=data_cache_bytes,
+            arrow_num_threads=int(args.arrow_num_threads),
         )
         val_loader = DataLoader(
             val_dataset,
             batch_size=int(args.batch_size),
             shuffle=False,
-            num_workers=min(int(args.num_workers), 2),
-            pin_memory=device_info.device.type == "cuda",
+            num_workers=min(dl_workers, 2),
+            pin_memory=False,
+            persistent_workers=dl_workers > 0,
             collate_fn=data.collate_batch,
         )
 

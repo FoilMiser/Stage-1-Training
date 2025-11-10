@@ -12,12 +12,13 @@ tqdm>=4.66.0
 gcsfs>=2024.1.0
 
 # --- Optional parquet support (only used if you read Parquet directly) ---
-pyarrow>=15.0.0
+pyarrow>=14.0.0,<15.0.0
 
 # --- Testing ---
 pytest>=7.4.0
 
 # --- Logging (silences sitecustomize import error) ---
-python-json-logger>=2.0.7
+python-json-logger==3.2.1
+psutil>=5.9
 
 # NOTE: Do NOT list FlashAttention here; it's installed from your GCS wheel at runtime.

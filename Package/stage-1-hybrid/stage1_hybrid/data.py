@@ -14,30 +14,26 @@ chosen HF model id from the CLI (e.g., `--dataset-tokenizer-id`).
 from __future__ import annotations
 
 import glob
-import gzip
 import hashlib
 import io
 import json
 import re
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
-
-try:  # optional dependency for parquet manifests
-    import pyarrow.parquet as pq
-except Exception:  # pragma: no cover
-    pq = None
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset
+from torch.utils.data import IterableDataset, get_worker_info
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from . import tool_use
-from .gcs_io import GCSIOError, gcs_to_local, list_gcs
+from .gcs_io import GCSIOError, gcs_to_local, iter_gcs, open_uri
+from .interleave import interleave
 from .prep import DatasetSpec, shards_ready
+from .stream_io import stream_jsonl, stream_jsonl_gz, stream_parquet
 from .utils import configure_logging
 
 logger = configure_logging()
@@ -45,7 +41,6 @@ logger = configure_logging()
 # -------------------------------
 # Local caches
 # -------------------------------
-_CACHE_DIR = Path("/tmp/manifest_cache"); _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 _LOGIT_CACHE_DIR = Path("/tmp/teacher_logits"); _LOGIT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -55,11 +50,26 @@ _LOGIT_CACHE_DIR = Path("/tmp/teacher_logits"); _LOGIT_CACHE_DIR.mkdir(parents=T
 @dataclass
 class ManifestEntry:
     """Represents one line in a manifest after resolution."""
+
     path: str
     resolved_path: str
     type: str
     weight: float = 1.0
     dataset_id: Optional[str] = None
+    approx_records: Optional[int] = None
+
+
+def _maybe_int(value) -> Optional[int]:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
 
 
 def read_manifest(
@@ -72,38 +82,65 @@ def read_manifest(
     summary useful for run metadata.
     """
     logger.info("Loading manifest from %s", manifest_path)
-    if manifest_path.startswith("gs://"):
-        local_path = gcs_to_local(manifest_path, "/tmp/manifest.jsonl")
-    else:
-        local_path = manifest_path
-
     entries: List[ManifestEntry] = []
     snapshot: List[Dict[str, object]] = []
-    with open(local_path, "r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            obj = json.loads(line)
-            raw_path = obj["path"]
-            dtype = obj.get("type", "lm")
-            weight = float(obj.get("weight", 1.0))
-            dataset_id = _match_dataset(raw_path, datasets_cfg)
-            resolved_path = _resolve_dataset_path(raw_path, dataset_id, datasets_cfg)
-            entry = ManifestEntry(
-                path=raw_path,
-                resolved_path=resolved_path,
-                type=dtype,
-                weight=weight,
-                dataset_id=dataset_id,
-            )
-            entries.append(entry)
-            snapshot.append({
-                "dataset_id": dataset_id,
-                "type": dtype,
-                "weight": weight,
-                "path": raw_path,
-                "resolved_path": resolved_path,
-            })
+    if manifest_path.startswith("gs://"):
+        with open_uri(manifest_path, "rb") as fh:
+            text = io.TextIOWrapper(fh, encoding="utf-8")
+            for line in text:
+                if not line.strip():
+                    continue
+                obj = json.loads(line)
+                raw_path = obj["path"]
+                dtype = obj.get("type", "lm")
+                weight = float(obj.get("weight", 1.0))
+                dataset_id = _match_dataset(raw_path, datasets_cfg)
+                resolved_path = _resolve_dataset_path(raw_path, dataset_id, datasets_cfg)
+                approx = obj.get("count") or obj.get("num_records") or obj.get("records")
+                entry = ManifestEntry(
+                    path=raw_path,
+                    resolved_path=resolved_path,
+                    type=dtype,
+                    weight=weight,
+                    dataset_id=dataset_id,
+                    approx_records=_maybe_int(approx),
+                )
+                entries.append(entry)
+                snapshot.append({
+                    "dataset_id": dataset_id,
+                    "type": dtype,
+                    "weight": weight,
+                    "path": raw_path,
+                    "resolved_path": resolved_path,
+                })
+    else:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                obj = json.loads(line)
+                raw_path = obj["path"]
+                dtype = obj.get("type", "lm")
+                weight = float(obj.get("weight", 1.0))
+                dataset_id = _match_dataset(raw_path, datasets_cfg)
+                resolved_path = _resolve_dataset_path(raw_path, dataset_id, datasets_cfg)
+                approx = obj.get("count") or obj.get("num_records") or obj.get("records")
+                entry = ManifestEntry(
+                    path=raw_path,
+                    resolved_path=resolved_path,
+                    type=dtype,
+                    weight=weight,
+                    dataset_id=dataset_id,
+                    approx_records=_maybe_int(approx),
+                )
+                entries.append(entry)
+                snapshot.append({
+                    "dataset_id": dataset_id,
+                    "type": dtype,
+                    "weight": weight,
+                    "path": raw_path,
+                    "resolved_path": resolved_path,
+                })
     return entries, snapshot
 
 
@@ -207,80 +244,59 @@ def _resolve_dataset_path(
     return raw_path
 
 
-def expand_gcs_pattern(pattern: str) -> List[str]:
+def expand_gcs_pattern(pattern: str) -> Iterator[str]:
     if pattern.startswith("gs://"):
         try:
-            return list_gcs(pattern)
+            yielded = False
+            for uri in iter_gcs(pattern):
+                yielded = True
+                yield uri
+            if not yielded:
+                yield pattern
         except GCSIOError:
             logger.warning("Failed to expand GCS pattern %s", pattern)
-            return [pattern]
-    matched = glob.glob(pattern)
-    return matched if matched else [pattern]
+            yield pattern
+        return
+
+    matched = False
+    for path in glob.iglob(pattern):
+        matched = True
+        yield path
+    if not matched:
+        yield pattern
 
 
-def _resolve_local(path: str) -> str:
-    if path.startswith("gs://"):
-        digest = hashlib.md5(path.encode("utf-8")).hexdigest()
-        local = _CACHE_DIR / f"{digest}_{Path(path).name}"
-        if not local.exists():
-            gcs_to_local(path, str(local))
-        return str(local)
-    return path
+class _TensorCache:
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max(0, int(max_bytes))
+        self._bytes = 0
+        self._store: OrderedDict[tuple[str, str], torch.Tensor] = OrderedDict()
+
+    def get(self, key: tuple[str, str]) -> Optional[torch.Tensor]:
+        tensor = self._store.pop(key, None)
+        if tensor is not None:
+            self._store[key] = tensor
+        return tensor
+
+    def put(self, key: tuple[str, str], tensor: torch.Tensor) -> None:
+        if self.max_bytes <= 0:
+            return
+        tensor = tensor.detach().cpu()
+        size = tensor.element_size() * tensor.nelement()
+        if size > self.max_bytes:
+            return
+        existing = self._store.pop(key, None)
+        if existing is not None:
+            self._bytes -= existing.element_size() * existing.nelement()
+        while self._bytes + size > self.max_bytes and self._store:
+            _, old = self._store.popitem(last=False)
+            self._bytes -= old.element_size() * old.nelement()
+        self._store[key] = tensor
+        self._bytes += size
 
 
-# ----------------------- record streaming -----------------------
-
-def _stream_json_lines(local_path: str) -> Iterator[Dict[str, object]]:
-    with open(local_path, "rb") as fh:
-        reader = io.BufferedReader(fh)
-        for raw in reader:
-            line = raw.decode("utf-8")
-            if not line.strip():
-                continue
-            yield json.loads(line)
-
-
-def _stream_json_gz(local_path: str) -> Iterator[Dict[str, object]]:
-    with gzip.open(local_path, "rt", encoding="utf-8") as fh:
-        for line in fh:
-            if not line.strip():
-                continue
-            yield json.loads(line)
-
-
-def _stream_parquet(local_path: str) -> Iterator[Dict[str, object]]:  # pragma: no cover
-    if pq is None:
-        raise RuntimeError("pyarrow is required to read parquet manifests")
-    table = pq.ParquetFile(local_path)
-    for batch in table.iter_batches():
-        for row in batch.to_pylist():
-            yield row
-
-
-def load_records(path: str) -> Iterator[Dict[str, object]]:
-    local = _resolve_local(path)
-    suffix = Path(local).suffix
-    if suffix == ".gz":
-        yield from _stream_json_gz(local)
-    elif suffix == ".parquet":
-        yield from _stream_parquet(local)
-    else:
-        yield from _stream_json_lines(local)
-
-
-# ----------------------- dataset -----------------------
-class ManifestDataset(Dataset):
-    """Torch dataset built from a manifest file.
-
-    Exposes the following fields per item:
-      - input_ids: LongTensor [seq]
-      - attention_mask: LongTensor [seq]
-      - sample_type: str in {"lm","math_tool","code"}
-      - sample_id: str (stable id used for teacher logit filenames)
-      - teacher_logits (optional): FloatTensor [seq, vocab]
-      - teacher_status: str in {"ok","missing","invalid","cached","disabled"}
-      - hybrid_skip_kd (optional): bool when strict mode disables KD for batch
-    """
+class ManifestDataset(IterableDataset):
+    """Torch dataset built from a manifest file using streaming readers."""
 
     def __init__(
         self,
@@ -296,35 +312,49 @@ class ManifestDataset(Dataset):
         code_logits_dir: Optional[str] = None,
         hybrid_strict: bool = False,
         split: str = "train",
+        streaming: bool = True,
+        parquet_batch_rows: int = 1024,
+        data_max_open_files: int = 2,
+        data_max_cache_bytes: int = 0,
+        arrow_num_threads: int = 1,
+        per_source_buffer: int = 1024,
     ) -> None:
         self.entries = list(manifest_entries)
         self.tokenizer = tokenizer
         self.seq_len = seq_len
         self.tool_use_ratio = tool_use_ratio
-        self.samples: List[Dict[str, str]] = []
-        self.dataset_counts: Dict[str, int] = {}
         self.teacher_mode = teacher_mode
-        self.teacher_logits_dir = teacher_logits_dir.rstrip("/") if teacher_logits_dir else None
+        self.teacher_logits_dir = teacher_logits_dir.rstrip('/') if teacher_logits_dir else None
         self.hybrid = hybrid
-        self.math_logits_dir = math_logits_dir.rstrip("/") if math_logits_dir else None
-        self.code_logits_dir = code_logits_dir.rstrip("/") if code_logits_dir else None
+        self.math_logits_dir = math_logits_dir.rstrip('/') if math_logits_dir else None
+        self.code_logits_dir = code_logits_dir.rstrip('/') if code_logits_dir else None
         self.hybrid_strict = hybrid_strict
         self.split = split
+        self.streaming = streaming
+        self.parquet_batch_rows = max(1, int(parquet_batch_rows))
+        self.data_max_open_files = max(1, int(data_max_open_files))
+        self.arrow_num_threads = max(1, int(arrow_num_threads))
+        self.per_source_buffer = max(1, int(per_source_buffer))
 
-        # caches + stats
-        self._teacher_cache: Dict[tuple[str, str], torch.Tensor] = {}
+        self.dataset_counts: Dict[str, int] = defaultdict(int)
+        self.sample_type_counts: Dict[str, int] = defaultdict(int)
+        self.auto_sample_counts: Dict[str, int] = {}
+
+        self._teacher_cache = _TensorCache(int(data_max_cache_bytes))
         self._auto_sample_counts: Dict[str, int] = defaultdict(int)
         self._bad_shape_warned: set[str] = set()
         self._missing_warned: Dict[str, set[str]] = defaultdict(set)
+        self._hybrid_missing_warned_types: set[str] = set()
         self._epoch_total = 0
         self._epoch_missing = 0
-        self.sample_type_counts: Dict[str, int] = {}
-        self._hybrid_missing_warned_types: set[str] = set()
 
-        logger.info("Tokenizer vocab_size=%s | pad_token=%r", getattr(self.tokenizer, "vocab_size", None), getattr(self.tokenizer, "pad_token", None))
-        self._build_index()
+        self._length_hint = sum(entry.approx_records or 0 for entry in self.entries)
+        logger.info(
+            "Tokenizer vocab_size=%s | pad_token=%r",
+            getattr(self.tokenizer, "vocab_size", None),
+            getattr(self.tokenizer, "pad_token", None),
+        )
 
-    # ----- lifecycle helpers -----
     def begin_epoch(self) -> None:
         self._epoch_total = 0
         self._epoch_missing = 0
@@ -332,55 +362,105 @@ class ManifestDataset(Dataset):
     def epoch_teacher_stats(self) -> tuple[int, int]:
         return self._epoch_total, self._epoch_missing
 
-    # ----- core dataset API -----
     def __len__(self) -> int:
-        return len(self.samples)
+        return int(self._length_hint) if self._length_hint else 0
 
-    def __getitem__(self, idx: int) -> Dict[str, object]:
-        sample = self.samples[idx]
+    def _iter_entry_paths(self, entry: ManifestEntry) -> Iterator[str]:
+        seen = False
+        for path in expand_gcs_pattern(entry.resolved_path):
+            seen = True
+            yield path
+        if not seen:
+            yield entry.resolved_path
+
+    def _stream_records(self, path: str) -> Iterator[Dict[str, object]]:
+        suffix = Path(path).suffix.lower()
+        try:
+            if suffix == '.gz':
+                yield from stream_jsonl_gz(path)
+            elif suffix == '.parquet':
+                yield from stream_parquet(
+                    path,
+                    batch_rows=self.parquet_batch_rows,
+                    arrow_num_threads=self.arrow_num_threads,
+                )
+            else:
+                yield from stream_jsonl(path)
+        except Exception as exc:
+            logger.warning("Failed to stream shard %s: %s", path, exc)
+
+    def _iter_entry(self, entry: ManifestEntry) -> Iterator[tuple[ManifestEntry, Dict[str, object]]]:
+        for path in self._iter_entry_paths(entry):
+            for record in self._stream_records(path):
+                record.setdefault('path', path)
+                yield entry, record
+
+    def _generate_sample(
+        self,
+        entry: ManifestEntry,
+        payload: Dict[str, object],
+    ) -> Optional[Dict[str, object]]:
+        text = payload.get('text', '')
+        if not isinstance(text, str) or not text:
+            return None
+        declared = payload.get('type', entry.type)
+        sample_type = _canonicalize_type(declared, payload.get('path', entry.resolved_path), entry.dataset_id)
+        if sample_type == 'math_tool':
+            text = tool_use.traces.maybe_inject_tool_result(text)
+
+        sample_id = payload.get('sample_id')
+        dataset_key = entry.dataset_id or entry.resolved_path
+        if not sample_id:
+            digest = hashlib.sha1(
+                f"{payload.get('path', entry.resolved_path)}:{payload.get('sha', '')}:{text[:200]}".encode('utf-8')
+            ).hexdigest()
+            sample_id = f'auto_{digest}'
+            self._auto_sample_counts[dataset_key] += 1
+
         tokens = self.tokenizer(
-            sample["text"],
+            text,
             truncation=True,
             max_length=self.seq_len,
-            padding="max_length",
-            return_tensors="pt",
+            padding='max_length',
+            return_tensors='pt',
         )
 
-        # normalize sample_type (defensive)
-        st = sample["sample_type"]
-        if st == "math":
-            st = "math_tool"
-        elif st in {"code_tool", "coding", "programming"}:
-            st = "code"
+        del text
+
+        st = sample_type
+        if st == 'math':
+            st = 'math_tool'
+        elif st in {'code_tool', 'coding', 'programming'}:
+            st = 'code'
 
         item: Dict[str, object] = {
-            "input_ids": tokens["input_ids"].squeeze(0),
-            "attention_mask": tokens["attention_mask"].squeeze(0),
-            "sample_type": st,
-            "sample_id": sample["sample_id"],
-            "type": st,  # legacy alias
+            'input_ids': tokens['input_ids'].squeeze(0),
+            'attention_mask': tokens['attention_mask'].squeeze(0),
+            'sample_type': st,
+            'sample_id': sample_id,
+            'type': st,
         }
 
-        directory: Optional[str] = None
-        source_tag = "disabled"
+        self.dataset_counts[dataset_key] += 1
+        self.sample_type_counts[st] += 1
 
-        # unified precompute mode (single output dir)
-        if self.teacher_mode == "precompute" and self.teacher_logits_dir:
+        directory: Optional[str] = None
+        source_tag = 'disabled'
+        if self.teacher_mode == 'precompute' and self.teacher_logits_dir:
             directory = self.teacher_logits_dir
-            source_tag = "precompute"
-        # hybrid routing (two output dirs) — relies on normalized type
-        elif self.hybrid and st in {"math_tool", "code"}:
-            directory = self.math_logits_dir if st == "math_tool" else self.code_logits_dir
+            source_tag = 'precompute'
+        elif self.hybrid and st in {'math_tool', 'code'}:
+            directory = self.math_logits_dir if st == 'math_tool' else self.code_logits_dir
             source_tag = st
 
         if directory:
-            logits, status = self._load_teacher_logits(sample["sample_id"], directory, source_tag)
+            logits, status = self._load_teacher_logits(sample_id, directory, source_tag)
             self._epoch_total += 1
-            if status in {"missing", "invalid"}:
+            if status in {'missing', 'invalid'}:
                 self._epoch_missing += 1
             if logits is not None:
-                item["teacher_logits"] = logits
-            if status == "missing" and self.hybrid and self.hybrid_strict and source_tag in {"math_tool", "code"}:
+                item['teacher_logits'] = logits
+            if status == 'missing' and self.hybrid and self.hybrid_strict and source_tag in {'math_tool', 'code'}:
                 warn_key = f"{self.split}:{source_tag}"
                 if warn_key not in self._hybrid_missing_warned_types:
                     self._hybrid_missing_warned_types.add(warn_key)
@@ -389,58 +469,26 @@ class ManifestDataset(Dataset):
                         source_tag,
                         self.split,
                     )
-                item["hybrid_skip_kd"] = True
-            item["teacher_status"] = status
+                item['hybrid_skip_kd'] = True
+            item['teacher_status'] = status
 
         return item
 
-    # ----- index construction -----
-    def _build_index(self) -> None:
-        counts: Dict[str, int] = defaultdict(int)
-        type_counts: Dict[str, int] = defaultdict(int)
-        for entry in self.entries:
-            resolved_paths = expand_gcs_pattern(entry.resolved_path)
-            dataset_key = entry.dataset_id or entry.resolved_path
-            for path in resolved_paths:
-                for row_idx, obj in enumerate(load_records(path)):
-                    text = obj.get("text", "")
-                    if not isinstance(text, str) or not text:
-                        continue
+    def __iter__(self) -> Iterator[Dict[str, object]]:
+        worker = get_worker_info()
+        if worker is None:
+            entries = self.entries
+        else:
+            entries = self.entries[worker.id :: worker.num_workers]
 
-                    # canonicalize sample_type early
-                    declared = obj.get("type", entry.type)
-                    sample_type = _canonicalize_type(declared, path, entry.dataset_id)
+        sources = [self._iter_entry(entry) for entry in entries]
+        for entry, payload in interleave(sources, per_source_buffer=self.per_source_buffer):
+            sample = self._generate_sample(entry, payload)
+            if sample is not None:
+                yield sample
 
-                    # optional tool-use injection for math
-                    if sample_type == "math_tool":
-                        text = tool_use.traces.maybe_inject_tool_result(text)
-
-                    sample_id = obj.get("sample_id")
-                    if not sample_id:
-                        digest = hashlib.sha1(f"{path}:{row_idx}:{text[:200]}".encode("utf-8")).hexdigest()
-                        sample_id = f"auto_{digest}"
-                        self._auto_sample_counts[dataset_key] += 1
-
-                    self.samples.append({
-                        "text": text,
-                        "sample_type": sample_type,
-                        "sample_id": sample_id,
-                    })
-                    counts[dataset_key] += 1
-                    type_counts[sample_type] += 1
-
-        self.dataset_counts = dict(counts)
-        self.auto_sample_counts = dict(self._auto_sample_counts)
-        self.sample_type_counts = dict(type_counts)
-        logger.info("Loaded %d samples from manifest", len(self.samples))
-        logger.info("Sample-type distribution: %s", dict(self.sample_type_counts))
-        for dataset_key, missing in self._auto_sample_counts.items():
-            if missing:
-                logger.warning(
-                    "Dataset %s missing sample_id for %d records; auto-generated using SHA1",
-                    dataset_key,
-                    missing,
-                )
+        if not self.auto_sample_counts:
+            self.auto_sample_counts = dict(self._auto_sample_counts)
 
     # ----- teacher logits IO -----
     def _materialize_teacher_path(self, directory: str, sample_id: str, ext: str) -> Optional[str]:
@@ -460,22 +508,14 @@ class ManifestDataset(Dataset):
         return None
 
     def _normalize_teacher_logits(self, logits: torch.Tensor) -> torch.Tensor:
-        """Pad/crop logits to [seq_len, tokenizer_vocab].
-
-        This is *crucial* when mixing teachers with student/dataset tokenizers.
-        """
         logits = torch.as_tensor(logits).float()
         if logits.dim() != 2:
             logits = logits.view(-1, logits.shape[-1])
         seq_len, vocab_size = logits.shape
-
-        # sequence length normalization
         if seq_len < self.seq_len:
             logits = F.pad(logits, (0, 0, 0, self.seq_len - seq_len))
         elif seq_len > self.seq_len:
             logits = logits[: self.seq_len]
-
-        # vocab normalization to the tokenizer
         target_vocab = int(getattr(self.tokenizer, "vocab_size", vocab_size) or vocab_size)
         if vocab_size < target_vocab:
             logits = F.pad(logits, (0, target_vocab - vocab_size))
@@ -485,8 +525,9 @@ class ManifestDataset(Dataset):
 
     def _load_teacher_logits(self, sample_id: str, directory: str, tag: str) -> tuple[Optional[torch.Tensor], str]:
         cache_key = (directory, sample_id)
-        if cache_key in self._teacher_cache:
-            return self._teacher_cache[cache_key], "cached"
+        cached = self._teacher_cache.get(cache_key)
+        if cached is not None:
+            return cached, "cached"
         if not directory:
             return None, "disabled"
 
@@ -504,19 +545,21 @@ class ManifestDataset(Dataset):
                 key = f"shape:{Path(path).suffix}:{tag}"
                 if key not in self._bad_shape_warned:
                     self._bad_shape_warned.add(key)
-                    logger.warning("Teacher logits at %s have invalid shape %s; expected [T, V]; skipping", path, tuple(logits.shape))
+                    logger.warning(
+                        "Teacher logits at %s have invalid shape %s; expected [T, V]; skipping",
+                        path,
+                        tuple(logits.shape),
+                    )
                 return None, "invalid"
 
             logits = self._normalize_teacher_logits(logits)
-            self._teacher_cache[cache_key] = logits
+            self._teacher_cache.put(cache_key, logits)
             return logits, "ok"
 
         if sample_id not in self._missing_warned[directory]:
             self._missing_warned[directory].add(sample_id)
             logger.warning("Teacher logits missing for sample %s in %s", sample_id, directory)
         return None, "missing"
-
-
 # ----------------------- collate -----------------------
 
 def collate_batch(samples: Sequence[Dict[str, object]]) -> Dict[str, object]:

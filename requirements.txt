@@ -1,0 +1,10 @@
+ujson
+orjson
+tqdm
+gcsfs
+pyarrow
+fastparquet
+wikiextractor
+mwparserfromhell
+lxml
+pandas

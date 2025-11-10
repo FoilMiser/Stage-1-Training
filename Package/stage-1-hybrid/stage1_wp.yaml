@@ -1,0 +1,28 @@
+workerPoolSpecs:
+  - machineSpec:
+      machineType: g2-standard-8
+      acceleratorType: NVIDIA_L4
+      acceleratorCount: 1
+    replicaCount: 1
+    diskSpec:
+      bootDiskType: pd-ssd
+      bootDiskSizeGb: 500
+    containerSpec:
+      imageUri: us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-3:latest
+      command:
+        - /bin/bash
+      args:
+        - -c
+        - |
+          set -euo pipefail
+          export STREAMING="${STREAMING:-true}"
+          export DL_NUM_WORKERS="${DL_NUM_WORKERS:-2}"
+          export DL_PREFETCH_FACTOR="${DL_PREFETCH_FACTOR:-1}"
+          export PARQUET_BATCH_ROWS="${PARQUET_BATCH_ROWS:-1024}"
+          export DATA_MAX_OPEN_FILES="${DATA_MAX_OPEN_FILES:-2}"
+          export DATA_MAX_CACHE_BYTES="${DATA_MAX_CACHE_BYTES:-3221225472}"
+          export ARROW_NUM_THREADS="${ARROW_NUM_THREADS:-1}"
+          gsutil cp gs://liquid-llm-bucket-2/sandbox/stage-1-hybrid/stage-1-hybrid.zip /tmp/pkg.zip
+          unzip -q /tmp/pkg.zip -d /opt/code
+          cd /opt/code/stage-1-hybrid
+          bash stage1_runner.sh train

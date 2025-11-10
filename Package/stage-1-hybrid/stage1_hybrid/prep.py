@@ -8,11 +8,11 @@ import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 import yaml
 
-from .gcs_io import GCSIOError, gcs_to_local, list_gcs
+from .gcs_io import GCSIOError, dir_to_gcs, gcs_to_local, list_gcs
 from .utils import Backoff, configure_logging
 
 logger = configure_logging()
@@ -117,6 +117,54 @@ def shards_ready(out_dir: str) -> bool:
             return False
         return any(match.endswith(".jsonl") for match in matches)
     return any(Path(out_dir).glob("*.jsonl"))
+
+
+def upload_pipeline_logs(
+    logs_dir: str | Path,
+    logs_gcs_uri: str,
+    run_id: str,
+    *,
+    content_type_by_ext: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    """Upload toolkit logs to a stable GCS prefix.
+
+    Parameters
+    ----------
+    logs_dir:
+        Local directory containing ``*.log`` files from the preprocess toolkit.
+    logs_gcs_uri:
+        Root GCS directory for log uploads. When empty, the upload is skipped.
+    run_id:
+        Unique identifier for the current run. Used to build a subdirectory so
+        concurrent jobs do not clobber each other.
+    content_type_by_ext:
+        Optional mapping from file extension to desired content-type metadata.
+
+    Returns
+    -------
+    Optional[str]
+        The destination prefix if the upload succeeded, otherwise ``None``.
+    """
+
+    if not logs_gcs_uri:
+        logger.debug("Skipping log upload: no destination provided")
+        return None
+
+    path = Path(logs_dir)
+    if not path.exists():
+        logger.warning("Log directory %s missing; nothing to upload", path)
+        return None
+
+    dst_prefix = logs_gcs_uri.rstrip("/") + f"/prep_logs/{run_id}"
+    mapping = content_type_by_ext or {".log": "text/plain"}
+
+    try:
+        dir_to_gcs(str(path), dst_prefix, content_type_by_ext=mapping)
+        logger.info("Uploaded preprocess logs to %s", dst_prefix)
+        return dst_prefix
+    except Exception as exc:  # pragma: no cover - runtime environment
+        logger.warning("Failed to upload preprocess logs to %s: %s", dst_prefix, exc)
+        return None
 
 
 def run_pipeline(job: str, inp: str, out: str, extract_dir: str, timeout_s: int) -> Path:
@@ -250,4 +298,5 @@ __all__ = [
     "prepare_if_needed",
     "run_pipeline",
     "shards_ready",
+    "upload_pipeline_logs",
 ]
